@@ -4,5 +4,10 @@
       "memory": 1024,
       "maxDuration": 60
     }
+  },
+  "build": {
+    "env": {
+      "NEXT_TELEMETRY_DISABLED": "1"
+    }
   }
 }

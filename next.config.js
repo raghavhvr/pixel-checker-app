@@ -1,14 +1,15 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    // Don't bundle these into the serverless function output (they're huge).
-    // Vercel's @sparticuz/chromium loader needs to access them as plain files.
-    serverComponentsExternalPackages: ["@sparticuz/chromium", "playwright-core"],
-  },
-  // Avoid linting blocking the build during deploy iteration
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
+  // CRITICAL: Mark Sparticuz Chromium and Playwright as external packages so
+  // Next.js doesn't try to bundle them. Sparticuz uses relative path resolution
+  // for its binary files, which breaks if bundled.
+  serverExternalPackages: ["@sparticuz/chromium", "playwright-core", "playwright"],
+
+  // Required by Sparticuz when running on Vercel — it expects standalone output mode
+  // for proper file tracing of the chromium binary.
+  output: "standalone",
+
+  eslint: { ignoreDuringBuilds: true },
 };
 
 module.exports = nextConfig;

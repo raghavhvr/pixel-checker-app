@@ -7,61 +7,97 @@ This is the **runtime** version. Static analysis can't see piggybacks because th
 ## How it works
 
 1. User pastes a Floodlight tag.
-2. Vercel serverless function spins up headless Chrome via `@sparticuz/chromium` + `playwright-core`.
+2. Server-side function spins up headless Chrome.
 3. Function injects the tag into a sandbox HTML page and lets it fire.
 4. Every network request is captured for ~8 seconds.
 5. Each request is classified (Floodlight vs piggyback), matched against a vendor allowlist, and scanned for PII / HTTP / failures.
 6. Results stream back to the UI.
 
-## Local development
+## Deploy options
+
+The audit endpoint launches a real Chromium browser. This means **system libraries** matter — Chromium needs `libnss3`, `libatk1.0-0`, etc. Three deploy paths solve this:
+
+### Option A — Vercel (easiest, requires Pro plan)
+
+```bash
+npm i -g vercel
+vercel deploy
+```
+
+Uses `@sparticuz/chromium`, a Chromium build optimized for AWS Lambda. The route auto-detects `process.env.VERCEL` and uses the right binary. **Requires Vercel Pro** for the 60s `maxDuration` — Hobby caps you at 10s, which isn't enough for cold start + audit window.
+
+### Option B — Docker (recommended for self-hosting)
+
+The included `Dockerfile` uses Microsoft's official Playwright image, which has every Chromium dep pre-installed. Build and run anywhere:
+
+```bash
+docker build -t pixel-checker .
+docker run -p 3000:3000 pixel-checker
+```
+
+Deploy that container to Railway, Fly.io, Render, AWS ECS, GCP Cloud Run, etc. No system-library fighting.
+
+### Option C — Local dev / bare Linux
 
 ```bash
 npm install
-# Playwright pulls its own Chromium for local dev (Sparticuz is for serverless only)
-npx playwright install chromium
+# Install Chromium AND its system deps. Requires sudo for the deps.
+npx playwright install --with-deps chromium
 
 npm run dev
 # Open http://localhost:3000
 ```
 
-## Deploy to Vercel
+If `--with-deps` fails (e.g., on RHEL/Amazon Linux), install manually:
 
 ```bash
-# Install Vercel CLI if you don't have it
-npm i -g vercel
+# Debian/Ubuntu
+sudo apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+  libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+  libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2
 
-# From the project root
-vercel deploy
-# Or push to a Git repo connected to Vercel — auto-deploys
+# Then install Chromium without deps
+npx playwright install chromium
 ```
 
-### Vercel notes
+## Troubleshooting
 
-- **Function size**: Sparticuz Chromium is ~50MB compressed. Vercel's serverless function limit is 250MB unzipped on Hobby, 250MB on Pro. This fits.
-- **Memory**: Set to 1024MB in `vercel.json`. Headless Chrome needs the headroom.
-- **Duration**: Set to 60s in `vercel.json`. The audit window is 8s but cold starts can take 5–10s additional. **60s requires a Pro plan**; on Hobby you're capped at 10s and this won't work — upgrade or self-host.
-- **Region**: Default is fine. If you're auditing region-specific tags (e.g., EU consent flows), set the function region to `fra1` or `iad1` accordingly.
+### `error while loading shared libraries: libnss3.so`
+
+You're running the audit endpoint on a Linux environment that doesn't have Chromium's required system libraries. Three fixes:
+
+1. **Use Docker.** The `Dockerfile` solves this. Easiest path.
+2. **Install deps manually.** `sudo apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2`
+3. **Use a different host.** Vercel, Railway with Nixpacks, and Fly.io with the Playwright image handle this for you.
+
+### `Audit failed — Target page, context or browser has been closed`
+
+Usually a downstream symptom of the libnss3 error above. Check the `detail` field in the API response.
+
+### `Function exceeded maximum duration`
+
+You're on Vercel Hobby (10s cap). Either upgrade to Pro, or reduce `CAPTURE_WINDOW_MS` in `app/api/audit/route.js` to 4000ms. Quality of results will degrade — slow piggybacks won't be caught.
 
 ## Limitations
 
-- **Single tag per request.** Could be extended to batch.
-- **No user interaction.** Tags that require a click/form submit to fire won't fire here. Page View Floodlights work; conversion Floodlights triggered by GTM events won't.
-- **No consent context.** Real users may have OneTrust / TCF strings that suppress some piggybacks. This sandbox has no consent state, so you'll see the maximum-fire scenario.
-- **8-second capture window.** Slow piggybacks past 8s won't be caught. Tunable in `app/api/audit/route.js`.
-- **Vendor allowlist is hardcoded** in `lib/vendors.js`. Add new vendors as they show up.
+- **One tag per request.** Could be batched.
+- **No user interaction.** Tags requiring a click/form submit to fire won't fire here. Page View Floodlights work; click-triggered conversions don't.
+- **No consent context.** Real users may have OneTrust / TCF strings that suppress some piggybacks. Sandbox has no consent state, so you'll see the maximum-fire scenario.
+- **8-second capture window.** Tunable in `app/api/audit/route.js`.
+- **Vendor allowlist hardcoded** in `lib/vendors.js`.
 
 ## File structure
 
 ```
 pixel-checker/
 ├── app/
-│   ├── api/
-│   │   └── audit/route.js     # Playwright endpoint
+│   ├── api/audit/route.js     # Playwright endpoint
 │   ├── layout.jsx
 │   ├── page.jsx               # Main UI
 │   └── globals.css
 ├── lib/
 │   └── vendors.js             # Vendor allowlist + audit rules
+├── Dockerfile                 # For container deploys
 ├── package.json
 ├── next.config.js
 ├── tailwind.config.js
@@ -69,10 +105,9 @@ pixel-checker/
 └── README.md
 ```
 
-## Extending
+## Production hardening (do before public deploy)
 
-- **Add vendors**: edit `KNOWN_VENDORS` in `lib/vendors.js`.
-- **Add audit rules**: edit `auditRequest()` in `lib/vendors.js` — new findings get picked up by the UI automatically.
-- **Persist audits**: add a database (Vercel Postgres, Supabase) and write to it from `route.js`.
-- **Auth**: wrap with Clerk or Auth.js — don't ship this open to the internet, headless browser endpoints get abused.
-- **Rate limit**: Upstash Redis + `@upstash/ratelimit` is one file.
+- **Auth.** Wrap with Clerk or Auth.js. Open headless-browser endpoints get abused.
+- **Rate limit.** Upstash Redis + `@upstash/ratelimit`, one file.
+- **Persistence.** Vercel Postgres or Supabase to log audits and re-run them later.
+- **URL allowlist.** If you only audit your own org's tags, validate the input contains expected Floodlight account IDs.
