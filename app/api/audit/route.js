@@ -1,15 +1,24 @@
-// app/api/audit/route.js — Runtime audit endpoint, Vercel-compatible
+// app/api/audit/route.js — Runtime audit endpoint
 //
-// VERCEL DEPLOYMENT REQUIREMENTS:
-//   1. Disable "Fluid Compute" in Project Settings → Functions
-//   2. Set function memory to 1024MB+ (configured in vercel.json)
-//   3. Pro plan required for 60s maxDuration
-//   4. Verify next.config.js has serverComponentsExternalPackages set correctly
+// VERCEL DEPLOYMENT REQUIREMENTS (do all four):
 //
-// LOCAL DEV: requires `npx playwright install --with-deps chromium`
-//   (uses playwright-core pointing at the locally-installed Chromium)
+//   1. In Vercel Dashboard → Project → Settings → Environment Variables, ADD:
+//        AWS_LAMBDA_JS_RUNTIME = nodejs20.x
+//      This MUST be set in the dashboard, not in code. Sparticuz checks this
+//      env var at module-import time, before any of your code runs.
+//
+//   2. In Vercel Dashboard → Project → Settings → Functions:
+//        - Disable "Fluid Compute" (toggle OFF)
+//        - Confirm memory is 1024MB+
+//
+//   3. Pro plan required for the 60s maxDuration in vercel.json.
+//
+//   4. After making the above changes, force a fresh deploy:
+//        vercel --prod --force
+//      OR push a new commit. Old function builds may use cached settings.
 
 import { NextResponse } from "next/server";
+import path from "node:path";
 import { auditRequest, isFloodlightUrl, getHost, validateInput } from "@/lib/vendors";
 
 export const runtime = "nodejs";
@@ -34,13 +43,11 @@ const buildHostPage = (tagCode) => `<!DOCTYPE html>
 </html>`;
 
 /**
- * Launch Chromium. Always uses playwright-core. The difference between local and
- * serverless is just the executablePath:
- *   - Serverless (Vercel/Lambda): @sparticuz/chromium provides the binary
- *   - Local: Playwright's CLI installed Chromium to a known location
- *
- * All imports are dynamic (await import) so webpack doesn't try to statically
- * trace into playwright-core's internals at build time.
+ * Launch Chromium. The Vercel-correct setup requires three things beyond
+ * the basic Sparticuz example:
+ *   - AWS_LAMBDA_JS_RUNTIME set BEFORE module imports (do this in Dashboard)
+ *   - LD_LIBRARY_PATH set to Chromium's extraction directory before launch
+ *   - chromiumPack.setGraphicsMode(false) to avoid a known freezing bug
  */
 const launchBrowser = async () => {
   const { chromium } = await import("playwright-core");
@@ -48,20 +55,43 @@ const launchBrowser = async () => {
 
   if (isServerless) {
     const sparticuz = (await import("@sparticuz/chromium")).default;
+
+    // Fallback: if AWS_LAMBDA_JS_RUNTIME wasn't set in the Vercel Dashboard, set it here.
+    // (The proper place is the Dashboard, but this catches the case where someone
+    // forgot to set it — Sparticuz already imported, but some downstream checks
+    // still read this var.)
+    if (!process.env.AWS_LAMBDA_JS_RUNTIME) {
+      process.env.AWS_LAMBDA_JS_RUNTIME = "nodejs20.x";
+    }
+
+    // Disable graphics mode to prevent the "Target page, context or browser closed" freeze
+    if (typeof sparticuz.setGraphicsMode === "function") {
+      sparticuz.setGraphicsMode = false;
+    }
+
+    // Get the executable path — Sparticuz extracts Chromium + libs to /tmp on first call
+    const executablePath = await sparticuz.executablePath();
+
+    // CRITICAL FIX: tell the Linux dynamic loader where Chromium's bundled .so files live.
+    // Without this, /tmp/chromium can't find libnss3.so even though Sparticuz extracted it.
+    // This is the documented fix for the libnss3 / libnspr4 errors on Vercel in 2026.
+    const execDir = path.dirname(executablePath);
+    process.env.LD_LIBRARY_PATH = execDir + (process.env.LD_LIBRARY_PATH ? ":" + process.env.LD_LIBRARY_PATH : "");
+
     return chromium.launch({
       args: [
         ...sparticuz.args,
         "--hide-scrollbars",
         "--disable-web-security",
       ],
-      executablePath: await sparticuz.executablePath(),
+      executablePath,
       headless: true,
     });
   }
 
   // Local: rely on playwright-core finding Chromium that was installed via
-  // `npx playwright install chromium`. If it's not installed, this will
-  // throw a clear "Executable doesn't exist" error.
+  // `npx playwright install chromium`. If it's not installed, this throws
+  // a clear "Executable doesn't exist" error.
   return chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -104,19 +134,21 @@ export async function POST(req) {
       browser = await launchBrowser();
     } catch (launchErr) {
       const msg = launchErr.message || "";
-      if (msg.includes("libnss3") || msg.includes("libnspr4") || msg.includes("shared libraries") || msg.includes("error while loading")) {
+      if (msg.includes("libnss3") || msg.includes("libnspr4") || msg.includes("shared libraries")) {
         return NextResponse.json({
-          error: "Chromium failed to launch — system library or environment issue",
+          error: "Chromium failed to launch — system library issue persists",
           detail: msg,
-          fixes: process.env.VERCEL ? [
-            "1. Disable 'Fluid Compute' in Vercel Project Settings → Functions. Most common cause.",
-            "2. Confirm function memory is 1024MB+ and you're on Pro plan (60s timeout).",
-            "3. Try a redeploy with --force flag.",
-            "4. If still failing, switch to Docker deployment (see Dockerfile in repo).",
-          ] : [
-            "Local dev: run `npx playwright install --with-deps chromium`",
-            "Or use the Dockerfile (Microsoft Playwright image with all deps pre-installed).",
+          fixes: [
+            "1. CRITICAL: In Vercel Dashboard → Project → Settings → Environment Variables, set AWS_LAMBDA_JS_RUNTIME=nodejs20.x. Then REDEPLOY (env vars don't take effect on existing builds).",
+            "2. Disable 'Fluid Compute' in Settings → Functions.",
+            "3. Confirm function memory is 1024MB+ (requires Pro plan).",
+            "4. If all of the above are done and it still fails, switch to Docker on Railway/Fly.io. Vercel + Sparticuz has known fragility issues — Docker is more reliable.",
           ],
+          environmentCheck: {
+            VERCEL: !!process.env.VERCEL,
+            AWS_LAMBDA_JS_RUNTIME: process.env.AWS_LAMBDA_JS_RUNTIME || "(not set — set in Vercel Dashboard)",
+            LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH || "(not set)",
+          },
         }, { status: 500 });
       }
       throw launchErr;
@@ -222,5 +254,9 @@ export async function GET() {
     ok: true,
     info: "POST { tagCode: string } to fire the tag in headless Chrome and capture piggybacks.",
     runtime: process.env.VERCEL ? "vercel-serverless" : "local",
+    env: {
+      VERCEL: !!process.env.VERCEL,
+      AWS_LAMBDA_JS_RUNTIME: process.env.AWS_LAMBDA_JS_RUNTIME || "(not set)",
+    },
   });
 }

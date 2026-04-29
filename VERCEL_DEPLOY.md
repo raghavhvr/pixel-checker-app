@@ -1,102 +1,89 @@
-# VERCEL DEPLOYMENT GUIDE
+# VERCEL DEPLOYMENT — REQUIRED STEPS
 
-If you hit the `libnss3.so: cannot open shared object file` or `Target page, context or browser has been closed` error on Vercel, **the code isn't the problem** — it's the Vercel project configuration. Follow these steps in order.
+If you've hit `libnss3.so: cannot open shared object file` on Vercel after a successful build, the code is fine. The fix is **two environment configurations** that the basic Sparticuz docs don't mention. Do all of these in order.
 
-## Step 1 — Verify package versions
+## Step 1 — Set the runtime env var in Vercel Dashboard (CRITICAL)
 
-The Sparticuz Chromium version must match a Chromium release that Playwright supports. Versions in this repo's `package.json`:
+This is the actual fix for the libnss3 error.
 
-```json
-"@sparticuz/chromium": "^131.0.0",
-"playwright-core": "^1.48.0"
-```
+1. Go to **Vercel → your project → Settings → Environment Variables**
+2. Click **Add new**
+3. Set:
+   - **Name**: `AWS_LAMBDA_JS_RUNTIME`
+   - **Value**: `nodejs20.x`
+   - **Environments**: check **Production**, **Preview**, **Development**
+4. Save
 
-These are paired correctly. **Don't bump one without bumping the other** — you'll get exactly the libnss3 error if they desync.
+**Why this matters**: Sparticuz Chromium checks `process.env.AWS_LAMBDA_JS_RUNTIME` at module-import time to decide which Chromium binary variant to extract. If the env var isn't set, it picks the wrong variant whose libraries aren't compatible with Vercel's Node 20 runtime — hence the missing libnss3.
 
-If you need a newer version, check https://github.com/Sparticuz/chromium/releases for the supported Playwright/Puppeteer version of any given release.
+You can't set this in your `.js` code because the Sparticuz module imports before your code runs. **It must be set in the Dashboard.**
 
-## Step 2 — Disable Fluid Compute (CRITICAL)
+## Step 2 — Disable Fluid Compute
 
-This is the most common cause of your specific error. Vercel's "Fluid Compute" feature changes the function runtime in a way that breaks Sparticuz Chromium.
+1. **Settings → Functions** (or "Compute" in newer Vercel UI)
+2. Find **Fluid Compute** (sometimes labeled just "Fluid")
+3. Toggle **OFF**
 
-1. Go to your Vercel project
-2. **Settings** → **Functions**
-3. Find **Fluid Compute** (or "Fluid")
-4. **Toggle it OFF**
-5. Redeploy
+Fluid Compute changes the function runtime in a way that breaks Sparticuz's `/tmp/chromium` extraction. There are multiple Vercel community threads confirming this. Until Vercel and Sparticuz reconcile this, leave it off.
 
-When Fluid Compute is on, you'll see exactly the error you reported:
-```
-browserType.launch: Target page, context or browser has been closed
-[pid=51][err] /tmp/chromium: error while loading shared libraries: libnss3.so
-```
+## Step 3 — Confirm function memory and plan
 
-## Step 3 — Confirm function memory and duration
+- **Memory**: 1024MB (set in `vercel.json`, but verify in Dashboard)
+- **Plan**: Pro required for the 60s `maxDuration`. On Hobby (10s cap), Sparticuz can't finish extracting Chromium before the function times out — which manifests as the same libnss3 error on next invocation.
 
-In **Settings** → **Functions**:
+## Step 4 — Force a fresh deploy
 
-- **Memory**: 1024 MB minimum (set in `vercel.json`, but verify it's applied)
-- **Max Duration**: 60 seconds (requires Pro plan)
-
-If you're on Hobby tier, max duration is capped at 10s. The audit will time out before Sparticuz can extract Chromium from `/tmp/chromium-pack` on cold start. **You must upgrade to Pro for this to work reliably**, OR reduce `CAPTURE_WINDOW_MS` to 4000 in the route — but then you'll miss slow piggybacks.
-
-## Step 4 — Verify Node.js runtime version
-
-In **Settings** → **General** → **Node.js Version**:
-
-- Set to **20.x** (current LTS as of 2026)
-
-Sparticuz no longer supports Node 14, and Node 18 is past EOL. Use 20.
-
-## Step 5 — Verify region
-
-In **Settings** → **Functions** → **Function Region**:
-
-- Pick a region close to where your Floodlight server lives (usually `iad1` for US, `fra1` for EU)
-- Sparticuz works on all Vercel regions
-
-## Step 6 — Redeploy
-
-After making the above changes, force a fresh deploy:
+Env var changes don't apply to existing function deployments. You must redeploy:
 
 ```bash
 vercel --prod --force
 ```
 
-Or trigger a fresh deploy from the dashboard. Old function builds may still have cached config.
+Or push a new commit to trigger a fresh build. Or in the Dashboard: Deployments → ⋯ on the latest deploy → **Redeploy**.
 
-## Step 7 — Test
-
-Hit `/api/audit` directly with `GET` first to confirm the route is reachable:
+## Step 5 — Verify it worked
 
 ```bash
 curl https://YOUR-DEPLOYMENT.vercel.app/api/audit
-# Should return: {"ok": true, "info": "...", "runtime": "vercel-serverless"}
 ```
 
-If you get `runtime: "local"` in production, something is wrong with the env detection — `process.env.VERCEL` should be set automatically by Vercel.
-
-Then test the actual audit:
-
-```bash
-curl -X POST https://YOUR-DEPLOYMENT.vercel.app/api/audit \
-  -H "Content-Type: application/json" \
-  -d '{"tagCode":"<script>document.write(\"<iframe src=\\\"https://6789.fls.doubleclick.net/activityi;src=6789;type=conv0;cat=signu0;ord=1?\\\" width=\\\"1\\\" height=\\\"1\\\"></iframe>\");</script>"}'
+You should see:
+```json
+{
+  "ok": true,
+  "info": "...",
+  "runtime": "vercel-serverless",
+  "env": {
+    "VERCEL": true,
+    "AWS_LAMBDA_JS_RUNTIME": "nodejs20.x"
+  }
+}
 ```
 
-## Still failing?
+If `AWS_LAMBDA_JS_RUNTIME` shows `(not set)`, Step 1 didn't take effect. Re-check the Dashboard, and make sure you redeployed after adding the env var.
 
-If after all of the above you still get the libnss3 error, **switch to Docker**. The included `Dockerfile` uses Microsoft's official Playwright image which has every system library pre-installed. Deploy the container to:
+Then test the actual audit endpoint with a Floodlight tag (use the UI or POST directly).
 
-- **Railway** — `railway up` from the project root, auto-detects the Dockerfile
-- **Fly.io** — `fly launch` and `fly deploy`
-- **Render** — connect the repo, choose "Web Service from Dockerfile"
-- **Google Cloud Run** — `gcloud run deploy --source .`
+## If it STILL fails after all of this
 
-Same UX, no Vercel/Sparticuz fragility.
+You've hit the wall. Vercel + Sparticuz is genuinely fragile, and any of the following can re-break it without warning:
 
-## Why this is so brittle
+- Vercel platform updates that change the Lambda runtime
+- Sparticuz version mismatches with Playwright
+- Hobby/Pro plan policy changes
+- Node version changes
 
-Vercel + Chromium is one of the most cursed deployment combos in serverless. Every six months the platform changes something (Edge runtime, Fluid Compute, function size limits, Node version defaults) and the existing Sparticuz patterns break. Docker is more verbose to set up but immune to all of this — you control the entire runtime.
+**Switch to Docker.** The included `Dockerfile` uses Microsoft's official Playwright image with all dependencies pre-installed. Deploy to:
 
-For a tool you'll actually use day-to-day, I'd recommend the Docker path on Railway or Fly.io. ~$5/mo, no fights.
+- **Railway** — fastest setup. `npm i -g @railway/cli && railway login && railway up`. ~$5/mo.
+- **Fly.io** — `fly launch && fly deploy`. ~$2-5/mo.
+- **Render** — connect Git repo, choose "Web Service from Dockerfile".
+- **Google Cloud Run** — `gcloud run deploy --source .`. Generous free tier.
+
+Same code, no Vercel-specific fragility. You control the entire runtime.
+
+## Why I'm being so blunt about this
+
+I've now sent you four versions of this app trying to make Vercel work. Each version fixes a real Vercel-specific issue, but the platform keeps throwing new ones. That's not a code problem — it's a fundamental mismatch between Vercel's serverless model and the practical needs of running headless Chromium.
+
+Docker on Railway/Fly is genuinely the right answer for a tool you'll use day-to-day. The setup is 10 minutes and then the brittleness goes away.
