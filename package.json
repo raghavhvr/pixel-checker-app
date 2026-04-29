@@ -6,25 +6,23 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "playwright:install": "playwright install chromium"
   },
   "dependencies": {
     "@sparticuz/chromium": "^131.0.0",
     "lucide-react": "^0.439.0",
-    "next": "^14.2.15",
-    "playwright-core": "^1.48.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "next": "14.2.15",
+    "playwright-core": "1.48.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "autoprefixer": "^10.4.20",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "^14.2.15",
-    "playwright": "^1.48.0",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.13"
+    "autoprefixer": "10.4.20",
+    "postcss": "8.4.47",
+    "tailwindcss": "3.4.13"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": "20.x"
   }
 }

@@ -1,12 +1,13 @@
-// app/api/audit/route.js — Runtime audit endpoint, Vercel-optimized
+// app/api/audit/route.js — Runtime audit endpoint, Vercel-compatible
 //
 // VERCEL DEPLOYMENT REQUIREMENTS:
-//   1. Set env var in Vercel Dashboard (not in code): NODE_OPTIONS="--no-warnings"
-//   2. Disable "Fluid Compute" in Project Settings → Functions
-//   3. Set function memory to 1024MB+ (configured in vercel.json)
-//   4. Pro plan required for 60s maxDuration
+//   1. Disable "Fluid Compute" in Project Settings → Functions
+//   2. Set function memory to 1024MB+ (configured in vercel.json)
+//   3. Pro plan required for 60s maxDuration
+//   4. Verify next.config.js has serverComponentsExternalPackages set correctly
 //
 // LOCAL DEV: requires `npx playwright install --with-deps chromium`
+//   (uses playwright-core pointing at the locally-installed Chromium)
 
 import { NextResponse } from "next/server";
 import { auditRequest, isFloodlightUrl, getHost, validateInput } from "@/lib/vendors";
@@ -33,42 +34,35 @@ const buildHostPage = (tagCode) => `<!DOCTYPE html>
 </html>`;
 
 /**
- * Launch Chromium based on environment.
+ * Launch Chromium. Always uses playwright-core. The difference between local and
+ * serverless is just the executablePath:
+ *   - Serverless (Vercel/Lambda): @sparticuz/chromium provides the binary
+ *   - Local: Playwright's CLI installed Chromium to a known location
  *
- * On Vercel/Lambda: use @sparticuz/chromium with playwright-core. Sparticuz ships
- *   Chromium + its system libs as a self-contained tarball that extracts to /tmp.
- *
- * Locally: use full `playwright` package (with its own Chromium download).
- *   This requires `npx playwright install --with-deps chromium` once.
+ * All imports are dynamic (await import) so webpack doesn't try to statically
+ * trace into playwright-core's internals at build time.
  */
 const launchBrowser = async () => {
+  const { chromium } = await import("playwright-core");
   const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 
   if (isServerless) {
-    // Critical: import these dynamically so Next.js doesn't try to bundle them
-    const chromium = (await import("@sparticuz/chromium")).default;
-    const { chromium: playwrightChromium } = await import("playwright-core");
-
-    // Sparticuz's recommended args + headless mode flag
-    return playwrightChromium.launch({
+    const sparticuz = (await import("@sparticuz/chromium")).default;
+    return chromium.launch({
       args: [
-        ...chromium.args,
+        ...sparticuz.args,
         "--hide-scrollbars",
         "--disable-web-security",
       ],
-      executablePath: await chromium.executablePath(),
+      executablePath: await sparticuz.executablePath(),
       headless: true,
     });
   }
 
-  // Local / Docker — use full Playwright
-  let pw;
-  try {
-    pw = await import("playwright");
-  } catch {
-    pw = await import("playwright-core");
-  }
-  return pw.chromium.launch({
+  // Local: rely on playwright-core finding Chromium that was installed via
+  // `npx playwright install chromium`. If it's not installed, this will
+  // throw a clear "Executable doesn't exist" error.
+  return chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
@@ -115,14 +109,13 @@ export async function POST(req) {
           error: "Chromium failed to launch — system library or environment issue",
           detail: msg,
           fixes: process.env.VERCEL ? [
-            "1. In Vercel Project Settings → Functions: DISABLE 'Fluid Compute'. This is the most common cause.",
-            "2. Confirm the function has 1024MB+ memory (Pro plan required).",
-            "3. Verify @sparticuz/chromium and playwright-core versions match the supported Chromium version.",
-            "4. Try re-deploying — Sparticuz extracts to /tmp on cold start; sometimes the extraction fails on first run.",
-            "5. If it still fails, the environment may not support Sparticuz — switch to a Docker deployment (see Dockerfile).",
+            "1. Disable 'Fluid Compute' in Vercel Project Settings → Functions. Most common cause.",
+            "2. Confirm function memory is 1024MB+ and you're on Pro plan (60s timeout).",
+            "3. Try a redeploy with --force flag.",
+            "4. If still failing, switch to Docker deployment (see Dockerfile in repo).",
           ] : [
             "Local dev: run `npx playwright install --with-deps chromium`",
-            "Or build the Dockerfile in this repo, which uses Microsoft's Playwright image with all deps pre-installed.",
+            "Or use the Dockerfile (Microsoft Playwright image with all deps pre-installed).",
           ],
         }, { status: 500 });
       }

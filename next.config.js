@@ -1,13 +1,28 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // CRITICAL: Mark Sparticuz Chromium and Playwright as external packages so
-  // Next.js doesn't try to bundle them. Sparticuz uses relative path resolution
-  // for its binary files, which breaks if bundled.
-  serverExternalPackages: ["@sparticuz/chromium", "playwright-core", "playwright"],
+  // Next.js 14 syntax (under experimental). Next.js 15 uses top-level serverExternalPackages.
+  experimental: {
+    serverComponentsExternalPackages: [
+      "@sparticuz/chromium",
+      "playwright-core",
+      "playwright",
+    ],
+  },
 
-  // Required by Sparticuz when running on Vercel — it expects standalone output mode
-  // for proper file tracing of the chromium binary.
-  output: "standalone",
+  // Belt-and-suspenders: explicitly tell webpack not to bundle these.
+  // Sparticuz uses runtime path resolution to find its binary files, which breaks
+  // when bundled. Marking them as external forces require() at runtime.
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      config.externals = config.externals || [];
+      config.externals.push(
+        "@sparticuz/chromium",
+        "playwright-core",
+        "playwright"
+      );
+    }
+    return config;
+  },
 
   eslint: { ignoreDuringBuilds: true },
 };
